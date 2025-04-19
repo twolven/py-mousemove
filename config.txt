@@ -1,0 +1,17 @@
+# Example config.txt (NO [Client] or [Server] headers)
+# Settings for both client and server can be in one file
+
+# Client Settings
+SERVER_IP = 192.168.1.3
+# SERVER_PORT is shared, defined below
+POLL_INTERVAL = 2
+VHUSB_CHECK_INTERVAL = 30
+WINDOW_TITLE = Breaker - Moonlight
+
+# Server Settings
+DEVICE_ID = GWire.126
+SERVER_PORT = 8080 # Shared setting
+HEARTBEAT_TIMEOUT = 17
+WARNING_INTERVAL = 60
+PROCESS_TO_KILL = League of Legends.exe
+HOTKEY = \
