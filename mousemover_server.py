@@ -63,7 +63,9 @@ def load_config_custom(filename="config.txt"):
 
                 # Use partition to handle potential '=' in value
                 key, sep, value = line.partition('=')
-                key = key.strip(); value = value.strip()
+                key = key.strip()
+                value = value.strip()
+
                 try:
                     # Server Specific Keys
                     if key == "DEVICE_ID": DEVICE_ID = value; loaded_values += 1
