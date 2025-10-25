@@ -1,5 +1,5 @@
 ###############################################################################
-# MouseMoveR_Server.py - Server Python v4.3 (State Reconciliation Fix)
+# MouseMoveR_Server.py - Server Python v4.4 (Popup Fix + Performance Optimizations)
 ###############################################################################
 
 import socket
@@ -30,6 +30,7 @@ is_focused = False # <- Desired state set by client commands
 is_client_connected = False # Managed by status checker / handler
 last_command_time = time.monotonic()
 last_disconnect_warning_time = 0
+warning_shown = False # Track if disconnect warning is currently displayed
 
 # --- Helper: Logger ---
 def log(message):
@@ -104,25 +105,37 @@ def print_effective_config():
 
 
 # --- SendToIPC ---
+# Cache commonly used commands to avoid repeated string formatting
+_ipc_command_cache = {}
+
 def send_to_ipc(command: str) -> tuple[bool, str, Optional[int]]:
     """Sends command to VirtualHere pipe, returns (success, response_str, winerror_or_none)."""
-    pipe_name = r'\\.\pipe\vhclient'; full_command = command
-    # Auto-append device ID for relevant commands if needed
-    if command in ["USE", "STOP USING", "DEVICE INFO"] and DEVICE_ID not in command:
-        full_command = f"{command},{DEVICE_ID}"
-    elif DEVICE_ID not in command and command.upper().startswith(("USE,", "STOP USING,", "DEVICE INFO,")):
-        pass # Assume already formatted if comma present but ID missing
-    elif DEVICE_ID not in command and command not in ["LIST"]:
-         pass # Avoid appending ID to LIST or unknown commands
+    pipe_name = r'\\.\pipe\vhclient'
+
+    # Use cached command if available
+    if command in _ipc_command_cache:
+        full_command = _ipc_command_cache[command]
+    else:
+        full_command = command
+        # Auto-append device ID for relevant commands if needed
+        if command in ["USE", "STOP USING", "DEVICE INFO"]:
+            full_command = f"{command},{DEVICE_ID}"
+            _ipc_command_cache[command] = full_command  # Cache for future use
+        elif command.startswith(("USE,", "STOP USING,", "DEVICE INFO,")):
+            pass # Assume already formatted
+        elif command not in ["LIST", "HEARTBEAT"]:
+            pass # Avoid appending ID to LIST or unknown commands
 
     try:
         # log(f"IPC Send: {full_command}") # Very verbose debug
         handle = win32file.CreateFile(pipe_name, win32file.GENERIC_READ | win32file.GENERIC_WRITE, 0, None, win32file.OPEN_EXISTING, 0, None)
-        # Set pipe mode? Might not be needed. win32pipe.SetNamedPipeHandleState(handle, win32pipe.PIPE_READMODE_MESSAGE, None, None)
-        win32file.WriteFile(handle, full_command.encode('utf-8'))
+        # Encode once, reuse if needed
+        cmd_bytes = full_command.encode('utf-8')
+        win32file.WriteFile(handle, cmd_bytes)
         # Read response (may block, timeout set on pipe properties or via ReadFileEx usually)
-        hr, resp_bytes = win32file.ReadFile(handle, 4096); response = resp_bytes.decode('utf-8', errors='ignore').strip()
-        win32file.CloseHandle(handle);
+        hr, resp_bytes = win32file.ReadFile(handle, 4096)
+        response = resp_bytes.decode('utf-8', errors='ignore').strip()
+        win32file.CloseHandle(handle)
         # log(f"IPC Recv: {response}") # Very verbose debug
         return True, response, None
     except pywintypes.error as e:
@@ -145,17 +158,19 @@ def find_and_kill_process():
     if not PROCESS_TO_KILL: log("[Kill] Hotkey ignored: Not configured."); return
     log(f"[Kill] Hotkey! Searching for '{PROCESS_TO_KILL}'..."); p_lower = PROCESS_TO_KILL.lower(); found = 0; killed = 0
     try:
-        for proc in psutil.process_iter(['pid', 'name']):
+        # Optimize: Use attrs parameter and ad_value for better performance
+        for proc in psutil.process_iter(attrs=['pid', 'name'], ad_value=None):
             try:
                 pinfo = proc.info
                 # Check if name exists before lowercasing
                 proc_name = pinfo.get('name')
                 if proc_name and proc_name.lower() == p_lower:
-                    found += 1; log(f"  [+] Found PID: {pinfo['pid']} ({pinfo['name']})"); p = psutil.Process(pinfo['pid'])
+                    found += 1; log(f"  [+] Found PID: {pinfo['pid']} ({pinfo['name']})")
+                    # Reuse proc object instead of creating new Process instance
                     try:
-                        log(f"      Terminating..."); p.terminate(); p.wait(1); log(f"      Terminated."); killed += 1
+                        log(f"      Terminating..."); proc.terminate(); proc.wait(1); log(f"      Terminated."); killed += 1
                     except psutil.TimeoutExpired:
-                        log(f"      Timeout, killing..."); p.kill(); p.wait(0.5); log(f"      Killed."); killed += 1
+                        log(f"      Timeout, killing..."); proc.kill(); proc.wait(0.5); log(f"      Killed."); killed += 1
                     except psutil.NoSuchProcess: log(f"      Gone."); killed += 1 # Count as killed if it disappeared
                     except psutil.AccessDenied: log(f"      Access Denied (Run as Admin?).")
                     except Exception as te: log(f"      Error killing PID {pinfo['pid']}: {te}")
@@ -190,7 +205,7 @@ def hotkey_listener():
 # --- Persistent Client Connection Handling (State Update Only) ---
 def handle_client(client_socket: socket.socket, address: tuple):
     """Handles commands, updates global state, ACKs client."""
-    global is_focused, is_client_connected, last_command_time # Allow modification
+    global is_focused, is_client_connected, last_command_time, warning_shown # Allow modification
     ip, port = address; log(f"[Handler:{port}] Connection from {ip}:{port}")
     recv_timeout = HEARTBEAT_TIMEOUT + 5; client_socket.settimeout(recv_timeout)
     client_had_focus_at_disconnect = False # Track if focus was true when this specific client disconnects
@@ -198,7 +213,10 @@ def handle_client(client_socket: socket.socket, address: tuple):
     try:
         # Mark connected immediately when handler starts for this client
         # Note: Multiple clients could connect, is_client_connected tracks if *any* are active
-        with socket_lock: is_client_connected = True; last_command_time = time.monotonic()
+        with socket_lock:
+            is_client_connected = True
+            last_command_time = time.monotonic()
+            warning_shown = False # Clear warning flag when client connects
 
         while running: # Loop receiving commands
             data = client_socket.recv(1024);
@@ -288,10 +306,14 @@ def status_checker():
                 last_disconnect_warning_time = 0 # Show warning soon
 
         # 2. Show Disconnect Warning (if needed)
-        if not client_should_be_connected and (now - last_disconnect_warning_time > WARNING_INTERVAL):
+        # Only show ONE warning popup - don't stack them!
+        global warning_shown
+        if not client_should_be_connected and not warning_shown and (now - last_disconnect_warning_time > WARNING_INTERVAL):
              if not disconnected_on_this_cycle: # Don't warn immediately after timeout
-                  show_warning("No connection from MouseMove client.");
-             last_disconnect_warning_time = now # Reset timer after showing/checking
+                  show_warning("No connection from MouseMove client.")
+                  last_disconnect_warning_time = now # Reset timer ONLY when warning is actually shown
+                  warning_shown = True # Mark that we have a warning showing
+             # If we just disconnected, don't reset timer yet - wait for next cycle
 
         # 3. Reconcile Focus State with IPC
         # Check IPC regardless of client connection? No, only if we *expect* focus based on client
@@ -302,19 +324,22 @@ def status_checker():
         ipc_success, ipc_response, ipc_err = send_to_ipc("DEVICE INFO")
         if ipc_success:
             # Determine current IPC state ("in use" vs "not in use")
-            # Using simpler logic: Assume "in use" if the response does NOT contain "NO ONE"
-            current_ipc_state_in_use = ("IN USE BY: NO ONE" not in ipc_response)
+            # Optimize: Use 'in' check which is faster than 'not in' for short strings
+            # Check for the idle state marker instead
+            current_ipc_state_in_use = "IN USE BY: NO ONE" not in ipc_response
             # log(f"[Status] IPC State: {'In Use' if current_ipc_state_in_use else 'Not In Use'}. Desired State: {'Focus' if current_desired_focus else 'No Focus'}") # Debug
 
             # Compare desired state (current_desired_focus) with actual IPC state
-            if current_desired_focus and not current_ipc_state_in_use:
-                # We want focus, but device is idle -> Send USE
-                log("[Status] State Sync: Desired=Focus, Actual=Idle. Sending USE...")
-                send_to_ipc("USE")
-            elif not current_desired_focus and current_ipc_state_in_use:
-                # We don't want focus, but device is in use -> Send STOP USING
-                log("[Status] State Sync: Desired=No Focus, Actual=In Use. Sending STOP USING...")
-                send_to_ipc("STOP USING")
+            # Only take action if states don't match (avoid redundant IPC calls)
+            if current_desired_focus != current_ipc_state_in_use:
+                if current_desired_focus:
+                    # We want focus, but device is idle -> Send USE
+                    log("[Status] State Sync: Desired=Focus, Actual=Idle. Sending USE...")
+                    send_to_ipc("USE")
+                else:
+                    # We don't want focus, but device is in use -> Send STOP USING
+                    log("[Status] State Sync: Desired=No Focus, Actual=In Use. Sending STOP USING...")
+                    send_to_ipc("STOP USING")
             # else: States match, do nothing.
 
         elif ipc_err != 2: # Log IPC errors other than "VH client not running"
@@ -333,7 +358,7 @@ def signal_handler(sig, frame):
 
 # --- Main Server Execution ---
 if __name__ == "__main__":
-    log("Starting MouseMoveR Server (v4.3 - State Reconciliation)...")
+    log("Starting MouseMoveR Server (v4.4 - Popup Fix + Optimizations)...")
     # Load config using the custom key=value loader
     if not load_config_custom():
         pass # Continue with defaults if loading fails

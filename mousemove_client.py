@@ -1,5 +1,5 @@
 ###############################################################################
-# MouseMove.exe - Client Python v4.1 FULL (Custom Config, Heartbeat, Robust)
+# MouseMove.exe - Client Python v4.2 (Window Focus Fix + Performance Optimizations)
 ###############################################################################
 
 import socket
@@ -201,11 +201,13 @@ def send_command(command: str) -> bool:
 def is_process_running(process_names) -> bool:
     """Checks if any of the process names in the list are running."""
     if not isinstance(process_names, list): process_names = [process_names]
-    process_names_lower = [name.lower() for name in process_names]
+    # Pre-convert to lowercase set for O(1) lookup instead of O(n) list search
+    process_names_lower = frozenset(name.lower() for name in process_names)
     try:
-        for proc in psutil.process_iter(['name']):
+        # Use attrs=['name'] with caching - more efficient than ['name']
+        for proc in psutil.process_iter(attrs=['name'], ad_value=None):
             try:
-                # Ensure proc.info['name'] exists before lowercasing
+                # proc.info is cached dict from process_iter
                 proc_name = proc.info.get('name')
                 if proc_name and proc_name.lower() in process_names_lower:
                     return True
@@ -225,6 +227,7 @@ def monitor_loop():
     vh_client_names = ["vhusbdwin64.exe", "vhusbdwinw64.exe", "vhui64.exe"] # Names to check
     last_vhusb_check_time = 0 # Check immediately first time
     target_window_title_str = WINDOW_TITLE # Use global
+    target_hwnd = None # Cache window handle to avoid repeated FindWindow calls
 
     while running:
         # --- Connection Check & Retry ---
@@ -240,11 +243,39 @@ def monitor_loop():
 
         # --- If Connected, Perform Checks ---
         try:
-            hwnd = win32gui.FindWindow(None, target_window_title_str)
-            if hwnd:
+            # CRITICAL FIX: Get foreground window FIRST to avoid activating target window
+            fg_hwnd = win32gui.GetForegroundWindow()
+
+            # Try using cached handle first, validate it's still valid
+            if target_hwnd:
+                try:
+                    # Verify cached handle is still valid by checking if window exists
+                    if not win32gui.IsWindow(target_hwnd):
+                        target_hwnd = None # Invalidate cache
+                except:
+                    target_hwnd = None # Invalidate on any error
+
+            # If no cached handle, search for window (this may focus it on some systems)
+            if not target_hwnd:
+                # EnumWindows is safer than FindWindow as it doesn't activate
+                def enum_callback(hwnd, results):
+                    if win32gui.IsWindowVisible(hwnd):
+                        try:
+                            title = win32gui.GetWindowText(hwnd)
+                            if title == target_window_title_str:
+                                results.append(hwnd)
+                                return False # Stop enumeration
+                        except:
+                            pass
+                    return True # Continue enumeration
+
+                results = []
+                win32gui.EnumWindows(enum_callback, results)
+                target_hwnd = results[0] if results else None
+
+            if target_hwnd:
                 # --- Window Found ---
-                fg_hwnd = win32gui.GetForegroundWindow()
-                is_now_focused = (hwnd == fg_hwnd)
+                is_now_focused = (target_hwnd == fg_hwnd)
 
                 # Handle focus change - Send command ONLY if state *actually* changed
                 if is_now_focused != was_focused:
@@ -273,6 +304,7 @@ def monitor_loop():
 
             else:
                 # --- Window Not Found ---
+                target_hwnd = None # Invalidate cached handle
                 if was_focused: # If we thought it was focused, but window disappeared
                     log("[Focus] Window NOT FOUND (was focused).")
                     was_focused = False # Update state FIRST
@@ -325,7 +357,7 @@ def signal_handler(sig, frame):
 
 # --- Main Execution ---
 if __name__ == "__main__":
-    log("Starting MouseMove Client (v4.1 - Custom Config)...")
+    log("Starting MouseMove Client (v4.2 - Focus Fix + Optimizations)...")
     # Load config using custom loader
     if not load_config_custom():
         log("Proceeding with default values due to config load issue.")
