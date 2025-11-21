@@ -1,5 +1,5 @@
 ###############################################################################
-# MouseMoveR_Server.py - Server Python v4.4 (Popup Fix + Performance Optimizations)
+# MouseMoveR_Server.py - Server Python v4.5 (Device Identity Verification)
 ###############################################################################
 
 import socket
@@ -16,6 +16,9 @@ from typing import Optional
 
 # --- Global configuration (Defaults) ---
 DEVICE_ID = "GWire.17"
+DEVICE_PRODUCT = ""  # Expected product name for safety verification
+DEVICE_VENDOR_ID = ""  # Expected vendor ID (e.g., "0x046d")
+DEVICE_PRODUCT_ID = ""  # Expected product ID (e.g., "0xc099")
 SERVER_PORT = 8080
 HEARTBEAT_TIMEOUT = 17 # Timeout since last command
 WARNING_INTERVAL = 60
@@ -39,7 +42,8 @@ def log(message):
 # --- Custom Config Loader ---
 def load_config_custom(filename="config.txt"):
     """Loads configuration from the original key=value format file."""
-    global DEVICE_ID, SERVER_PORT, HEARTBEAT_TIMEOUT, WARNING_INTERVAL, \
+    global DEVICE_ID, DEVICE_PRODUCT, DEVICE_VENDOR_ID, DEVICE_PRODUCT_ID, \
+           SERVER_PORT, HEARTBEAT_TIMEOUT, WARNING_INTERVAL, \
            PROCESS_TO_KILL, HOTKEY, POLL_INTERVAL
 
     log(f"Attempting to load config from: {filename}")
@@ -70,6 +74,9 @@ def load_config_custom(filename="config.txt"):
                 try:
                     # Server Specific Keys
                     if key == "DEVICE_ID": DEVICE_ID = value; loaded_values += 1
+                    elif key == "DEVICE_PRODUCT": DEVICE_PRODUCT = value; loaded_values += 1
+                    elif key == "DEVICE_VENDOR_ID": DEVICE_VENDOR_ID = value; loaded_values += 1
+                    elif key == "DEVICE_PRODUCT_ID": DEVICE_PRODUCT_ID = value; loaded_values += 1
                     elif key == "SERVER_PORT": SERVER_PORT = int(value); loaded_values += 1
                     elif key == "HEARTBEAT_TIMEOUT": HEARTBEAT_TIMEOUT = int(value); loaded_values += 1
                     elif key == "WARNING_INTERVAL": WARNING_INTERVAL = int(value); loaded_values += 1
@@ -96,6 +103,9 @@ def print_effective_config():
      """Prints the currently active configuration values."""
      log("Effective configuration:")
      log(f"  DEVICE_ID        : {DEVICE_ID}")
+     log(f"  DEVICE_PRODUCT   : '{DEVICE_PRODUCT or '[Not Set - UNSAFE!]'}'")
+     log(f"  DEVICE_VENDOR_ID : '{DEVICE_VENDOR_ID or '[Not Set - UNSAFE!]'}'")
+     log(f"  DEVICE_PRODUCT_ID: '{DEVICE_PRODUCT_ID or '[Not Set - UNSAFE!]'}'")
      log(f"  SERVER_PORT      : {SERVER_PORT}")
      log(f"  HEARTBEAT_TIMEOUT: {HEARTBEAT_TIMEOUT}s (Since last command)")
      log(f"  WARNING_INTERVAL : {WARNING_INTERVAL}s")
@@ -143,6 +153,62 @@ def send_to_ipc(command: str) -> tuple[bool, str, Optional[int]]:
         if e.winerror != 2: log(f"[IPC] pywintypes error {e.winerror} for '{full_command}': {e.strerror}")
         return False, "", e.winerror
     except Exception as e: log(f"[IPC] Unexpected error for '{full_command}': {e}"); return False, "", -1
+
+
+# --- Device Identity Verification ---
+def verify_device_identity() -> tuple[bool, str]:
+    """
+    Verifies the device at DEVICE_ID matches expected identity fields.
+    Returns: (is_valid, error_message_or_empty)
+    """
+    # Skip verification if no identity fields are configured
+    if not DEVICE_PRODUCT and not DEVICE_VENDOR_ID and not DEVICE_PRODUCT_ID:
+        log("[Safety] WARNING: No device identity verification configured! Any device at this address will be used.")
+        return True, ""  # Allow operation but warn
+
+    # Query device info
+    success, response, err = send_to_ipc("DEVICE INFO")
+    if not success:
+        error = f"Failed to query device info (VirtualHere client not running?)"
+        log(f"[Safety] {error}")
+        return False, error
+
+    # Parse response into dict
+    device_info = {}
+    for line in response.split('\n'):
+        line = line.strip()
+        if ':' in line:
+            key, sep, value = line.partition(':')
+            device_info[key.strip().upper()] = value.strip()
+
+    log(f"[Safety] Verifying device identity for {DEVICE_ID}...")
+    log(f"[Safety]   Found: PRODUCT='{device_info.get('PRODUCT', 'N/A')}' VENDOR ID='{device_info.get('VENDOR ID', 'N/A')}' PRODUCT ID='{device_info.get('PRODUCT ID', 'N/A')}'")
+
+    # Check each configured field
+    mismatches = []
+
+    if DEVICE_PRODUCT:
+        actual = device_info.get('PRODUCT', '')
+        if actual != DEVICE_PRODUCT:
+            mismatches.append(f"PRODUCT: expected '{DEVICE_PRODUCT}', got '{actual}'")
+
+    if DEVICE_VENDOR_ID:
+        actual = device_info.get('VENDOR ID', '')
+        if actual.lower() != DEVICE_VENDOR_ID.lower():
+            mismatches.append(f"VENDOR ID: expected '{DEVICE_VENDOR_ID}', got '{actual}'")
+
+    if DEVICE_PRODUCT_ID:
+        actual = device_info.get('PRODUCT ID', '')
+        if actual.lower() != DEVICE_PRODUCT_ID.lower():
+            mismatches.append(f"PRODUCT ID: expected '{DEVICE_PRODUCT_ID}', got '{actual}'")
+
+    if mismatches:
+        error = f"DEVICE IDENTITY MISMATCH at {DEVICE_ID}! {'; '.join(mismatches)}"
+        log(f"[Safety] ERROR: {error}")
+        return False, error
+
+    log(f"[Safety] Device identity verified successfully!")
+    return True, ""
 
 
 # --- Warning Message Display ---
@@ -333,9 +399,19 @@ def status_checker():
             # Only take action if states don't match (avoid redundant IPC calls)
             if current_desired_focus != current_ipc_state_in_use:
                 if current_desired_focus:
-                    # We want focus, but device is idle -> Send USE
-                    log("[Status] State Sync: Desired=Focus, Actual=Idle. Sending USE...")
-                    send_to_ipc("USE")
+                    # We want focus, but device is idle -> Verify identity then send USE
+                    log("[Status] State Sync: Desired=Focus, Actual=Idle. Verifying device identity...")
+                    is_valid, error_msg = verify_device_identity()
+                    if is_valid:
+                        log("[Status] Identity verified. Sending USE...")
+                        send_to_ipc("USE")
+                    else:
+                        # CRITICAL: Device identity mismatch! Do NOT use device!
+                        show_warning(f"CRITICAL: Device identity verification failed!\n\n{error_msg}\n\nRefusing to control device at {DEVICE_ID}.\n\nCheck config.txt and VirtualHere device address!")
+                        log("[Status] REFUSING to USE device due to identity mismatch!")
+                        # Force desired state to False to prevent repeated verification attempts
+                        with socket_lock:
+                            is_focused = False
                 else:
                     # We don't want focus, but device is in use -> Send STOP USING
                     log("[Status] State Sync: Desired=No Focus, Actual=In Use. Sending STOP USING...")
@@ -358,7 +434,7 @@ def signal_handler(sig, frame):
 
 # --- Main Server Execution ---
 if __name__ == "__main__":
-    log("Starting MouseMoveR Server (v4.4 - Popup Fix + Optimizations)...")
+    log("Starting MouseMoveR Server (v4.5 - Device Identity Verification)...")
     # Load config using the custom key=value loader
     if not load_config_custom():
         pass # Continue with defaults if loading fails

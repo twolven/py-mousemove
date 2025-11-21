@@ -1,0 +1,48 @@
+# Example config.txt
+# Settings for both MouseMove.exe (client) and MouseMoveR.exe (receiver)
+# Copy this file to config.txt and update with your values
+
+# ===== MouseMove.exe (Client) Settings =====
+# The IP address of the PC running MouseMoveR.exe (your gaming PC)
+SERVER_IP = 192.168.1.100
+
+# Shared setting - must match on both MouseMove.exe and MouseMoveR.exe
+SERVER_PORT = 8080
+
+# How often to check window focus (seconds)
+POLL_INTERVAL = 2
+
+# How often to check if VirtualHere client is running (seconds)
+VHUSB_CHECK_INTERVAL = 30
+
+# Window title to monitor (streaming client window)
+# Examples: "Moonlight", "Breaker - Moonlight", "Parsec", etc.
+WINDOW_TITLE = Moonlight
+
+# ===== MouseMoveR.exe (Receiver) Settings =====
+# VirtualHere device address (find via VirtualHere client device list)
+# Example: GWire.151 or similar
+# WARNING: VirtualHere can reassign these addresses! Use device identity fields below for safety.
+DEVICE_ID = GWire.151
+
+# SAFETY: Verify device identity before USE to prevent controlling wrong device
+# Get these values from VirtualHere "Device Properties" or run test_vh_device_info.py
+# Right-click your device in VirtualHere client → "Device Properties"
+DEVICE_PRODUCT = G502 X
+DEVICE_VENDOR_ID = 0x046d
+DEVICE_PRODUCT_ID = 0xc099
+
+# Heartbeat timeout - disconnect client if no message received for this many seconds
+HEARTBEAT_TIMEOUT = 17
+
+# How often to show "No connection from client" warning (seconds)
+WARNING_INTERVAL = 60
+
+# Process to kill when hotkey is pressed (leave empty to disable)
+# Example: League of Legends.exe, valorant.exe, etc.
+PROCESS_TO_KILL = League of Legends.exe
+
+# Hotkey to trigger process kill (leave empty to disable)
+# Use backslash for backslash key: \
+# Other examples: f1, f12, ctrl+alt+k, etc.
+HOTKEY = \
