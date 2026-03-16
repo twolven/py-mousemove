@@ -1,5 +1,5 @@
 ###############################################################################
-# MouseMoveR_Server.py - Server Python v4.6 (Device Not Found Warning)
+# MouseMoveR_Server.py - Server Python v4.7 (Instant State Sync)
 ###############################################################################
 
 import socket
@@ -29,11 +29,13 @@ POLL_INTERVAL = 2 # Default POLL_INTERVAL reduced for status checker
 # --- Global State ---
 running = True
 socket_lock = threading.Lock()
+state_changed = threading.Event()  # Wakes status_checker instantly on state change
 is_focused = False # <- Desired state set by client commands
 is_client_connected = False # Managed by status checker / handler
 last_command_time = time.monotonic()
 last_disconnect_warning_time = 0
 warning_shown = False # Track if disconnect warning is currently displayed
+device_identity_verified = False  # Cache: True after first successful verification
 
 # --- Helper: Logger ---
 def log(message):
@@ -300,13 +302,15 @@ def handle_client(client_socket: socket.socket, address: tuple):
 
                 # --- ONLY UPDATE STATE, DO NOT CALL IPC for FOCUS changes ---
                 if command == "FOCUSED":
-                    if not is_focused: # Only log the change
+                    if not is_focused: # Only log and signal on actual change
                          log(f"[State Update] Desired focus state changed to: True")
+                         state_changed.set()  # Wake status_checker immediately
                     is_focused = True
                     client_had_focus_at_disconnect = True # Track this client's last focus state
                 elif command == "NOT_FOCUSED":
-                     if is_focused: # Only log the change
+                     if is_focused: # Only log and signal on actual change
                           log(f"[State Update] Desired focus state changed to: False")
+                          state_changed.set()  # Wake status_checker immediately
                      is_focused = False
                      client_had_focus_at_disconnect = False
                 # Handle VHUSB warning immediately
@@ -338,6 +342,7 @@ def handle_client(client_socket: socket.socket, address: tuple):
              log(f"[Handler:{port}] Client disconnected while it had focus flag. Forcing desired state to False.")
              with socket_lock:
                   is_focused = False # Ensure desired state doesn't get stuck on True
+             state_changed.set()  # Wake status_checker to send STOP USING immediately
         # Close socket
         try: client_socket.shutdown(socket.SHUT_RDWR); client_socket.close()
         except OSError: pass
@@ -347,12 +352,14 @@ def handle_client(client_socket: socket.socket, address: tuple):
 # --- Status Checker Thread (Includes State Reconciliation) ---
 def status_checker():
     """Periodically checks client timeout and reconciles focus state with IPC."""
-    global is_client_connected, is_focused, last_command_time, last_disconnect_warning_time
+    global is_client_connected, is_focused, last_command_time, last_disconnect_warning_time, device_identity_verified
     log("[Status] Status checker thread started."); check_interval = max(1, POLL_INTERVAL)
-    log(f"[Status] Performing checks every {check_interval}s.")
+    log(f"[Status] Poll interval: {check_interval}s (wakes instantly on state change).")
 
     while running:
-        time.sleep(check_interval);
+        # Wait for either a state change signal OR the poll interval (whichever comes first)
+        state_changed.wait(timeout=check_interval)
+        state_changed.clear()  # Reset for next signal
         if not running: break
         now = time.monotonic(); disconnected_on_this_cycle = False
 
@@ -399,11 +406,19 @@ def status_checker():
             # Only take action if states don't match (avoid redundant IPC calls)
             if current_desired_focus != current_ipc_state_in_use:
                 if current_desired_focus:
-                    # We want focus, but device is idle -> Verify identity then send USE
-                    log("[Status] State Sync: Desired=Focus, Actual=Idle. Verifying device identity...")
-                    is_valid, error_msg = verify_device_identity()
+                    # We want focus, but device is idle -> Verify identity (cached) then send USE
+                    if not device_identity_verified:
+                        log("[Status] State Sync: Desired=Focus, Actual=Idle. Verifying device identity...")
+                        is_valid, error_msg = verify_device_identity()
+                        if is_valid:
+                            device_identity_verified = True
+                            log("[Status] Identity verified (cached for future USE calls).")
+                    else:
+                        is_valid, error_msg = True, ""
+                        log("[Status] State Sync: Desired=Focus, Actual=Idle. Identity cached, skipping verification.")
+
                     if is_valid:
-                        log("[Status] Identity verified. Sending USE...")
+                        log("[Status] Sending USE...")
                         use_ok, use_resp, use_err = send_to_ipc("USE")
                         # Check if USE command actually succeeded
                         use_resp_upper = use_resp.strip().upper() if use_ok else ""
@@ -420,6 +435,7 @@ def status_checker():
                             )
                     else:
                         # CRITICAL: Device identity mismatch! Do NOT use device!
+                        device_identity_verified = False  # Invalidate cache on failure
                         show_warning(f"CRITICAL: Device identity verification failed!\n\n{error_msg}\n\nRefusing to control device at {DEVICE_ID}.\n\nCheck config.txt and VirtualHere device address!")
                         log("[Status] REFUSING to USE device due to identity mismatch!")
                         # Force desired state to False to prevent repeated verification attempts
@@ -447,7 +463,7 @@ def signal_handler(sig, frame):
 
 # --- Main Server Execution ---
 if __name__ == "__main__":
-    log("Starting MouseMoveR Server (v4.6 - Device Not Found Warning)...")
+    log("Starting MouseMoveR Server (v4.7 - Instant State Sync)...")
     # Load config using the custom key=value loader
     if not load_config_custom():
         pass # Continue with defaults if loading fails
