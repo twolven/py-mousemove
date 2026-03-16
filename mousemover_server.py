@@ -1,5 +1,5 @@
 ###############################################################################
-# MouseMoveR_Server.py - Server Python v4.5 (Device Identity Verification)
+# MouseMoveR_Server.py - Server Python v4.6 (Device Not Found Warning)
 ###############################################################################
 
 import socket
@@ -447,7 +447,7 @@ def signal_handler(sig, frame):
 
 # --- Main Server Execution ---
 if __name__ == "__main__":
-    log("Starting MouseMoveR Server (v4.5 - Device Identity Verification)...")
+    log("Starting MouseMoveR Server (v4.6 - Device Not Found Warning)...")
     # Load config using the custom key=value loader
     if not load_config_custom():
         pass # Continue with defaults if loading fails
