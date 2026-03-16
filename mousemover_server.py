@@ -404,7 +404,20 @@ def status_checker():
                     is_valid, error_msg = verify_device_identity()
                     if is_valid:
                         log("[Status] Identity verified. Sending USE...")
-                        send_to_ipc("USE")
+                        use_ok, use_resp, use_err = send_to_ipc("USE")
+                        # Check if USE command actually succeeded
+                        use_resp_upper = use_resp.strip().upper() if use_ok else ""
+                        if not use_ok or (use_resp_upper and use_resp_upper not in ("OK", "ALREADY IN USE")):
+                            log(f"[Status] USE command failed! success={use_ok}, response='{use_resp}'")
+                            # Query LIST to show available devices
+                            list_ok, list_resp, _ = send_to_ipc("LIST")
+                            device_list = f"\n\nAvailable devices:\n{list_resp}" if list_ok and list_resp.strip() else ""
+                            show_warning(
+                                f"Failed to take control of device '{DEVICE_ID}'.\n\n"
+                                f"The device address may have changed (e.g. after swapping hardware). "
+                                f"Please check VirtualHere and update your config with the correct DEVICE_ID."
+                                f"{device_list}"
+                            )
                     else:
                         # CRITICAL: Device identity mismatch! Do NOT use device!
                         show_warning(f"CRITICAL: Device identity verification failed!\n\n{error_msg}\n\nRefusing to control device at {DEVICE_ID}.\n\nCheck config.txt and VirtualHere device address!")
