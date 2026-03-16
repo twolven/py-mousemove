@@ -419,12 +419,19 @@ def status_checker():
 
                     if is_valid:
                         log("[Status] Sending USE...")
-                        use_ok, use_resp, use_err = send_to_ipc("USE")
-                        # Check if USE command actually succeeded
+                        use_ok, use_resp, _ = send_to_ipc("USE")
                         use_resp_upper = use_resp.strip().upper() if use_ok else ""
-                        if not use_ok or (use_resp_upper and use_resp_upper not in ("OK", "ALREADY IN USE")):
-                            log(f"[Status] USE command failed! success={use_ok}, response='{use_resp}'")
-                            # Query LIST to show available devices
+                        if use_ok and use_resp_upper in ("OK", "ALREADY IN USE"):
+                            pass  # Success — nothing to do
+                        elif use_ok and "TIMEOUT" in use_resp_upper:
+                            # Transient VirtualHere timeout — will retry on next poll cycle
+                            log(f"[Status] USE got transient timeout, will retry: '{use_resp}'")
+                        elif not use_ok:
+                            # IPC pipe error — VH client may not be running
+                            log(f"[Status] USE IPC call failed, will retry next cycle.")
+                        else:
+                            # Actual device failure — show warning with device list
+                            log(f"[Status] USE command failed! response='{use_resp}'")
                             list_ok, list_resp, _ = send_to_ipc("LIST")
                             device_list = f"\n\nAvailable devices:\n{list_resp}" if list_ok and list_resp.strip() else ""
                             show_warning(
